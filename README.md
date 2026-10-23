@@ -27,6 +27,29 @@ CSV columns: `date`, `payee`, `amount` (required); `category`, `memo`, `type`
 (parent or subcategory) case-insensitively. Rows with an unknown or blank
 category are imported as "Uncategorized".
 
+Credit-card exports with `Date,Amount,Currency,Type,Status,Merchant,…` columns
+work with no setup: `Merchant` is the payee, `Type` decides direction
+(`PURCHASE`/`FEE` are expenses, `PAYMENT`/`REFUND` are income), and a blank
+merchant falls back to the type (e.g. "Payment"). `Status` is honored:
+`VOIDED`/`DECLINED` rows are never imported, and `AUTHORIZED`/`PENDING` rows
+are skipped unless you tick the box, since their amount can still change.
+
+### Duplicates
+
+Import overlapping exports as often as you like; only new transactions are
+added. A row counts as already imported when the account already has a
+transaction with the same date, amount and direction (identical rows in one
+file are counted, so two $5 rides on the same day both import). "Already in"
+comes from:
+
+- a ledger of every transaction this extension created, kept in the browser's
+  storage for `widgets.moneydesktop.com` (per browser profile), and
+- transactions Money Manager itself has loaded on the page.
+
+Deleting a transaction ("Delete last import", or in Money Manager while the
+extension is loaded) removes it from the ledger so it can be imported again.
+If you delete one some other way, tick "Import rows that match … anyway".
+
 ## How it works
 
 The content script runs in the page's main world and wraps `fetch`/`XHR`:

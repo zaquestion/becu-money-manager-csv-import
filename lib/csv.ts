@@ -1,15 +1,20 @@
 import Papa from 'papaparse';
 import { CREDIT, DEBIT } from './api';
 
-export const FIELDS = ['date', 'payee', 'amount', 'category', 'memo', 'type'] as const;
+export const FIELDS = ['date', 'payee', 'amount', 'category', 'memo', 'type', 'status'] as const;
 export type Field = (typeof FIELDS)[number];
 export type Mapping = Partial<Record<Field, string>>;
 export const REQUIRED: Field[] = ['date', 'payee', 'amount'];
 
 export type SignMode = 'negative-is-debit' | 'positive-is-debit' | 'type-column';
 
+// settled: import. pending: authorized but not posted yet; the amount can
+// still change (tips) or be voided. void: never import.
+export type RowStatus = 'settled' | 'pending' | 'void';
+
 export interface ParsedRow {
   line: number;
+  status: RowStatus;
   date: number;
   payee: string;
   amount: number;
@@ -44,6 +49,7 @@ const GUESSES: Record<Field, RegExp> = {
   category: /^category$/i,
   memo: /^(memo|notes?)$/i,
   type: /^(type|transaction type|debit\/credit)$/i,
+  status: /^(status|state)$/i,
 };
 
 export function guessMapping(headers: string[]): Mapping {
@@ -87,12 +93,24 @@ export function parseAmount(raw: string): number | null {
   return negative ? -n : n;
 }
 
+// Includes credit-card export types: PURCHASE/FEE add to the balance owed,
+// PAYMENT/REFUND reduce it.
 function parseType(raw: string): typeof CREDIT | typeof DEBIT | null {
-  const s = raw.trim().toLowerCase();
-  if (/^(debit|withdrawal|expense|dr|d)$/.test(s)) return DEBIT;
-  if (/^(credit|deposit|income|cr|c)$/.test(s)) return CREDIT;
+  const s = raw.trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+  if (/^(debit|withdrawal|expense|dr|d|purchase|sale|charge|fee|interest|cash advance)$/.test(s)) return DEBIT;
+  if (/^(credit|deposit|income|cr|c|payment|refund|return|reward|cashback|cash back)$/.test(s)) return CREDIT;
   return null;
 }
+
+// Unknown or blank statuses count as settled.
+function parseStatus(raw: string): RowStatus {
+  const s = raw.trim().toLowerCase();
+  if (/^(void|voided|declined|cancell?ed|failed|reversed|rejected)$/.test(s)) return 'void';
+  if (/^(authori[sz]ed|pending|processing|hold)$/.test(s)) return 'pending';
+  return 'settled';
+}
+
+const titleCase = (s: string) => s.toLowerCase().replace(/(^|[\s_-])\w/g, (c) => c.toUpperCase()).replace(/_/g, ' ');
 
 export function normalize(
   file: CsvFile,
@@ -110,7 +128,8 @@ export function normalize(
     const line = i + 2; // header is line 1
     const date = parseDate(get(record, 'date'));
     const amount = parseAmount(get(record, 'amount'));
-    const payee = get(record, 'payee');
+    // Card payments often have no merchant; name them after their type.
+    const payee = get(record, 'payee') || titleCase(get(record, 'type'));
     if (date === null) return errors.push({ line, message: `bad date "${get(record, 'date')}"` });
     if (amount === null) return errors.push({ line, message: `bad amount "${get(record, 'amount')}"` });
     if (!payee) return errors.push({ line, message: 'missing payee' });
@@ -128,6 +147,7 @@ export function normalize(
 
     rows.push({
       line,
+      status: parseStatus(get(record, 'status')),
       date,
       payee,
       amount: Math.abs(amount),

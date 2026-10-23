@@ -1,9 +1,10 @@
 import { ApiError, CREDIT, createTransaction, deleteTransaction, refreshEntities } from './api';
 import { FIELDS, REQUIRED, guessMapping, normalize, readCsv } from './csv';
 import type { CsvFile, Field, Mapping, ParsedRow, RowError, SignMode } from './csv';
+import { dedupKey, existingCounts, ledgerRevision, recordImport } from './dedup';
 import { STYLE } from './panel-style';
 import type { Category } from './session';
-import { accounts, categories, hasSession, onSessionChange } from './session';
+import { accounts, categories, forgetTransaction, hasSession, onSessionChange, transactionsRevision } from './session';
 
 const UNDO_KEY = 'becu-csv-import:last';
 const REQUEST_DELAY_MS = 250;
@@ -17,12 +18,13 @@ const FIELD_LABELS: Record<Field, string> = {
   category: 'Category',
   memo: 'Memo',
   type: 'Type',
+  status: 'Status',
 };
 
 const SIGN_MODES: [SignMode, string][] = [
   ['negative-is-debit', 'Negative amounts are expenses'],
   ['positive-is-debit', 'Positive amounts are expenses'],
-  ['type-column', 'Use the Type column (debit/credit)'],
+  ['type-column', 'Use the Type column (debit/credit, purchase/payment)'],
 ];
 
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
@@ -50,7 +52,8 @@ interface State {
   file?: CsvFile;
   fileName?: string;
   fileVersion: number;
-  importedVersion?: number; // fileVersion of the last file imported, to warn about duplicates
+  includePending: boolean;
+  includeDuplicates: boolean;
   fileError?: string;
   mapping: Mapping;
   signMode: SignMode;
@@ -66,6 +69,8 @@ const state: State = {
   stopRequested: false,
   accountGuid: '',
   fileVersion: 0,
+  includePending: false,
+  includeDuplicates: false,
   mapping: {},
   signMode: 'negative-is-debit',
   mappingExpanded: false,
@@ -138,9 +143,23 @@ function mappingProblem(): string | undefined {
 // ---------------------------------------------------------------------------
 // Preview (memoized: normalize + category matching only rerun when inputs change)
 
+// What happens to each valid row. Only 'new' rows are imported.
+type Disposition = 'new' | 'duplicate' | 'pending' | 'void';
+
+const DISPOSITION_LABELS: Record<Exclude<Disposition, 'new'>, string> = {
+  duplicate: 'Already imported',
+  pending: 'Pending',
+  void: 'Voided',
+};
+
 interface Preview {
   key: string;
   rows: ParsedRow[];
+  dispositions: Map<ParsedRow, Disposition>;
+  toImport: ParsedRow[];
+  duplicates: number;
+  pending: number;
+  voided: number;
   errors: RowError[];
   byName: Map<string, Category>;
   unknown: string[];
@@ -153,16 +172,42 @@ let cachedPreview: Preview | undefined;
 
 function getPreview(): Preview | undefined {
   if (!state.file || mappingProblem()) return undefined;
-  const key = JSON.stringify([state.fileVersion, state.mapping, state.signMode, categories.size]);
+  const key = JSON.stringify([
+    state.fileVersion, state.mapping, state.signMode, categories.size, state.accountGuid,
+    state.includePending, state.includeDuplicates, ledgerRevision, transactionsRevision,
+  ]);
   if (cachedPreview?.key === key) return cachedPreview;
 
   const { rows, errors } = normalize(state.file, state.mapping, state.signMode);
+  const existing = state.accountGuid ? existingCounts(state.accountGuid) : new Map<string, number>();
+  const dispositions = new Map<ParsedRow, Disposition>();
+  const toImport: ParsedRow[] = [];
+  const counts = { duplicate: 0, pending: 0, void: 0 };
+  for (const row of rows) {
+    let disposition: Disposition;
+    if (row.status === 'void') disposition = 'void';
+    else if (row.status === 'pending' && !state.includePending) disposition = 'pending';
+    else {
+      // Identical rows are fine (two $5 rides on one day); only as many as
+      // already exist count as duplicates.
+      const k = dedupKey(row.date, row.amount, row.type);
+      const left = existing.get(k) ?? 0;
+      if (left > 0 && !state.includeDuplicates) {
+        existing.set(k, left - 1);
+        disposition = 'duplicate';
+      } else disposition = 'new';
+    }
+    dispositions.set(row, disposition);
+    if (disposition === 'new') toImport.push(row);
+    else counts[disposition]++;
+  }
+
   const byName = categoryByName();
   const unknown = new Set<string>();
   const expenses = { count: 0, total: 0 };
   const income = { count: 0, total: 0 };
   let uncategorized = 0;
-  for (const row of rows) {
+  for (const row of toImport) {
     if (!matchedCategory(row, byName)) {
       uncategorized++;
       if (row.categoryName) unknown.add(row.categoryName);
@@ -171,7 +216,11 @@ function getPreview(): Preview | undefined {
     bucket.count++;
     bucket.total += row.amount;
   }
-  cachedPreview = { key, rows, errors, byName, unknown: [...unknown], uncategorized, expenses, income };
+  cachedPreview = {
+    key, rows, dispositions, toImport,
+    duplicates: counts.duplicate, pending: counts.pending, voided: counts.void,
+    errors, byName, unknown: [...unknown], uncategorized, expenses, income,
+  };
   return cachedPreview;
 }
 
@@ -182,6 +231,7 @@ function importBlocker(preview: Preview | undefined): string | undefined {
   if (mappingProblem()) return 'Finish the column mapping.';
   if (!categories.size) return 'Categories not loaded yet. Click Refresh.';
   if (!preview?.rows.length) return 'No valid rows to import.';
+  if (!preview.toImport.length) return 'Nothing new to import.';
   return undefined;
 }
 
@@ -259,9 +309,13 @@ function buildUi() {
   const errorsList = h('ul', {});
   const errorsBox = h('details', { className: 'callout danger' }, errorsSummary, errorsList);
   const unknownBox = h('p', { className: 'callout warn' });
+  const pendingCheck = h('input', { type: 'checkbox', id: 'include-pending' });
+  const pendingOption = h('label', { className: 'option', htmlFor: 'include-pending' }, pendingCheck, h('span', {}));
+  const dupCheck = h('input', { type: 'checkbox', id: 'include-dups' });
+  const dupOption = h('label', { className: 'option', htmlFor: 'include-dups' }, dupCheck, h('span', {}));
   const tableWrap = h('div', { className: 'table-wrap', tabIndex: 0, ariaLabel: 'Rows to import' });
   const tableNote = h('p', { className: 'hint' });
-  const step4 = step(4, 'Review', stats, errorsBox, unknownBox, tableWrap, tableNote);
+  const step4 = step(4, 'Review', stats, errorsBox, unknownBox, pendingOption, dupOption, tableWrap, tableNote);
 
   const content = h('div', { className: 'content' }, status, step1.section, step2.section, step3.section, step4.section);
 
@@ -294,6 +348,7 @@ function buildUi() {
     step2, fileInput, fileLabel, dropHint, chooseBtn, dropZone, fileError,
     step3, chips, editMapBtn, mapSummary, mapGrid, fieldSelects, fieldSamples, signSelect, mapWarn,
     step4, stats, errorsSummary, errorsList, errorsBox, unknownBox, tableWrap, tableNote,
+    pendingCheck, pendingOption, dupCheck, dupOption,
     content, progress, progressLabel, progressBar, result, resultText, reloadBtn, logBox, logPre,
     undoBtn, message, cancelBtn, stopBtn, confirmBtn, importBtn,
     tableKey: '',
@@ -481,15 +536,23 @@ function buildTable(p: Preview) {
     ...p.rows.slice(0, PREVIEW_LIMIT).map((row) => {
       const matched = matchedCategory(row, p.byName);
       const credit = row.type === CREDIT;
+      const disposition = p.dispositions.get(row)!;
+      const skipped = disposition !== 'new';
       return h(
         'tr',
-        {},
+        { className: skipped ? 'skip' : '' },
         h('td', { className: 'line', textContent: String(row.line) }),
         h('td', { className: 'date', textContent: formatDate(row.date) }),
-        h('td', { className: 'payee' }, row.payee, row.memo && h('span', { className: 'memo', textContent: row.memo })),
+        h(
+          'td',
+          { className: 'payee' },
+          row.payee,
+          skipped && h('span', { className: `tag ${disposition}`, textContent: DISPOSITION_LABELS[disposition] }),
+          row.memo && h('span', { className: 'memo', textContent: row.memo }),
+        ),
         h('td', {
-          className: matched ? '' : 'uncat',
-          textContent: matched?.name ?? 'Uncategorized',
+          className: matched || skipped ? '' : 'uncat',
+          textContent: skipped ? '' : (matched?.name ?? 'Uncategorized'),
           title: !matched && row.categoryName ? `"${row.categoryName}" isn't a Money Manager category` : '',
         }),
         h('td', { className: `num ${credit ? 'credit' : 'debit'}`, textContent: `${credit ? '+' : '−'}${money.format(row.amount)}` }),
@@ -503,13 +566,30 @@ function updateReview(u: NonNullable<typeof ui>, p: Preview | undefined) {
   u.step4.section.hidden = !p;
   if (!p) return;
 
+  const skippedParts = [
+    p.pending && `${p.pending} pending`,
+    p.voided && `${p.voided} voided`,
+    p.errors.length && `${p.errors.length} invalid`,
+  ].filter(Boolean);
   u.stats.replaceChildren(
-    stat('Ready', String(p.rows.length), 'transactions'),
+    stat('New', String(p.toImport.length), 'to import'),
     stat('Expenses', `−${money.format(p.expenses.total)}`, plural(p.expenses.count, 'row'), 'debit'),
     stat('Income', `+${money.format(p.income.total)}`, plural(p.income.count, 'row'), 'credit'),
-    stat('Skipped', String(p.errors.length), 'invalid rows', p.errors.length ? 'warn' : undefined),
-    stat('No category', String(p.uncategorized), '→ Uncategorized'),
+    stat('Already in', String(p.duplicates), 'skipped as duplicates'),
+    stat('Skipped', String(p.pending + p.voided + p.errors.length), skippedParts.join(', ') || 'none', p.errors.length ? 'warn' : undefined),
   );
+
+  const pendingRows = p.rows.filter((r) => r.status === 'pending').length;
+  u.pendingOption.hidden = !pendingRows;
+  u.pendingCheck.checked = state.includePending;
+  u.pendingCheck.disabled = isRunning();
+  u.pendingOption.lastElementChild!.textContent =
+    `Import ${plural(pendingRows, 'pending transaction')} now. Off by default: pending amounts can change (tips) or be voided, and settled rows import cleanly from a later export.`;
+  u.dupOption.hidden = !p.duplicates && !state.includeDuplicates;
+  u.dupCheck.checked = state.includeDuplicates;
+  u.dupCheck.disabled = isRunning();
+  u.dupOption.lastElementChild!.textContent =
+    'Import rows that match transactions already in this account (same date, amount and direction) anyway.';
 
   const fresh = u.tableKey !== p.key;
   u.errorsBox.hidden = !p.errors.length;
@@ -565,7 +645,7 @@ function updateFooter(u: NonNullable<typeof ui>, p: Preview | undefined) {
 
   // Actions
   const blocker = importBlocker(p);
-  const reimport = state.importedVersion === state.fileVersion;
+  const count = p?.toImport.length ?? 0;
   const undoCount = loadUndo().length;
   const confirming = phase === 'confirm-import' || phase === 'confirm-undo';
 
@@ -574,8 +654,7 @@ function updateFooter(u: NonNullable<typeof ui>, p: Preview | undefined) {
 
   u.importBtn.hidden = phase !== 'idle';
   u.importBtn.disabled = !!blocker;
-  u.importBtn.textContent = reimport ? 'Import again' : p?.rows.length ? `Import ${plural(p.rows.length, 'transaction')}` : 'Import';
-  u.importBtn.className = reimport ? 'btn' : 'btn primary';
+  u.importBtn.textContent = count ? `Import ${plural(count, 'transaction')}` : 'Import';
 
   u.confirmBtn.hidden = !confirming;
   u.cancelBtn.hidden = !confirming;
@@ -586,9 +665,9 @@ function updateFooter(u: NonNullable<typeof ui>, p: Preview | undefined) {
   const account = accounts.get(state.accountGuid);
   u.message.classList.toggle('confirm', confirming);
   if (phase === 'confirm-import') {
-    u.message.textContent = reimport
-      ? `This file was already imported. Add ${plural(p?.rows.length ?? 0, 'duplicate transaction')} to “${account?.name ?? ''}”?`
-      : `Add ${plural(p?.rows.length ?? 0, 'transaction')} to “${account?.name ?? ''}”?`;
+    u.message.textContent = state.includeDuplicates
+      ? `Add ${plural(count, 'transaction')} to “${account?.name ?? ''}”, including ones that look already imported?`
+      : `Add ${plural(count, 'transaction')} to “${account?.name ?? ''}”?`;
     u.confirmBtn.className = 'btn primary';
     u.confirmBtn.textContent = 'Confirm import';
   } else if (phase === 'confirm-undo') {
@@ -598,7 +677,7 @@ function updateFooter(u: NonNullable<typeof ui>, p: Preview | undefined) {
   } else if (running) {
     u.message.textContent = 'Keep this page open until it finishes.';
   } else {
-    u.message.textContent = blocker ?? (reimport ? 'Already imported. Importing again creates duplicates.' : '');
+    u.message.textContent = blocker ?? '';
   }
 }
 
@@ -655,9 +734,9 @@ async function runImport() {
   const account = accounts.get(state.accountGuid);
   if (!preview || !account || importBlocker(preview)) return setPhase('idle');
 
-  const rows = preview.rows;
+  const rows = preview.toImport;
   const job = startJob('import', rows.length, account.name);
-  state.importedVersion = state.fileVersion;
+  state.includeDuplicates = false;
   setPhase('importing', ui?.stopBtn);
   const created: string[] = [];
   let failures = 0;
@@ -680,6 +759,7 @@ async function runImport() {
       });
       created.push(guid);
       saveUndo(created);
+      recordImport(account.guid, dedupKey(row.date, row.amount, row.type), guid);
       failures = 0;
       job.ok++;
       appendLog(`✓ line ${row.line}: ${row.payee}`);
@@ -721,6 +801,7 @@ async function runUndo() {
       await deleteTransaction(guid);
       remaining.splice(remaining.indexOf(guid), 1);
       saveUndo(remaining);
+      forgetTransaction(guid); // also drops it from the dedup ledger
       job.ok++;
       appendLog(`✓ deleted ${guid}`);
     } catch (err) {
@@ -758,6 +839,8 @@ async function loadFile(file: File) {
   state.mapping = guessMapping(parsed.headers);
   state.signMode = state.mapping.type ? 'type-column' : 'negative-is-debit';
   state.mappingExpanded = false;
+  state.includePending = false;
+  state.includeDuplicates = false;
   if (state.job?.finished) state.job = undefined;
   state.phase = 'idle';
   update();
@@ -864,6 +947,17 @@ function wire(u: NonNullable<typeof ui>) {
   }
   u.signSelect.addEventListener('change', () => {
     state.signMode = u.signSelect.value as SignMode;
+    if (state.phase === 'confirm-import') state.phase = 'idle';
+    update();
+  });
+
+  u.pendingCheck.addEventListener('change', () => {
+    state.includePending = u.pendingCheck.checked;
+    if (state.phase === 'confirm-import') state.phase = 'idle';
+    update();
+  });
+  u.dupCheck.addEventListener('change', () => {
+    state.includeDuplicates = u.dupCheck.checked;
     if (state.phase === 'confirm-import') state.phase = 'idle';
     update();
   });

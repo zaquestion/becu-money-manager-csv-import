@@ -173,6 +173,14 @@ export const STYLE = `
   .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
   td.debit { color: var(--danger); }
   td.credit { color: var(--ok); }
+  tr.skip td { color: var(--muted); }
+  tr.skip td.payee { text-decoration: line-through; text-decoration-color: var(--border); }
+  .tag { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--subtle); color: var(--muted); font-size: 11px; text-decoration: none; }
+  .tag.pending { background: var(--warn-bg); color: var(--warn); }
+
+  .option { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .option[hidden] { display: none; }
+  .option input { margin: 2px 0 0; }
 
   /* Footer */
   footer { border-top: 1px solid var(--border); padding: 10px 16px; display: flex; flex-direction: column; gap: 8px; background: var(--bg); }

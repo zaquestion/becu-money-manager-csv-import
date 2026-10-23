@@ -8,6 +8,15 @@ export interface Account {
   isManual?: boolean;
 }
 
+// Just what dedup needs from transactions the widget loads.
+export interface KnownTransaction {
+  guid: string;
+  accountGuid: string;
+  date: number; // unix seconds
+  amount: number;
+  type: number;
+}
+
 export interface Category {
   guid: string;
   name: string;
@@ -21,10 +30,21 @@ const CAPTURE = (name: string) => name === 'md-session-token' || name.startsWith
 export const capturedHeaders: Record<string, string> = {};
 export const accounts = new Map<string, Account>();
 export const categories = new Map<string, Category>();
+export const transactions = new Map<string, KnownTransaction>();
+// Bumped whenever `transactions` changes, so callers can cheaply tell.
+export let transactionsRevision = 0;
 
 const listeners = new Set<() => void>();
 export const onSessionChange = (fn: () => void) => listeners.add(fn);
 const notify = () => listeners.forEach((fn) => fn());
+const deleteListeners = new Set<(guid: string) => void>();
+export const onTransactionDeleted = (fn: (guid: string) => void) => deleteListeners.add(fn);
+
+export function forgetTransaction(guid: string) {
+  if (transactions.delete(guid)) transactionsRevision++;
+  deleteListeners.forEach((fn) => fn(guid));
+  notify();
+}
 
 // Keep an unwrapped fetch for our own calls.
 export const rawFetch = window.fetch.bind(window);
@@ -64,6 +84,21 @@ export function scanEntities(value: unknown, depth = 0) {
         parentGuid: typeof obj.parent_guid === 'string' ? obj.parent_guid : null,
       });
       notify();
+    } else if (guid.startsWith('TRN-')) {
+      const amount = Number(obj.amount);
+      const date = typeof obj.date === 'number' ? obj.date : Date.parse(String(obj.date)) / 1000;
+      if (obj.is_deleted === true) {
+        if (transactions.delete(guid)) transactionsRevision++;
+      } else if (
+        typeof obj.account_guid === 'string' &&
+        Number.isFinite(amount) &&
+        Number.isFinite(date) &&
+        (obj.transaction_type === 1 || obj.transaction_type === 2)
+      ) {
+        transactions.set(guid, { guid, accountGuid: obj.account_guid, date, amount: Math.abs(amount), type: obj.transaction_type });
+        transactionsRevision++;
+      }
+      notify();
     } else if (guid.startsWith('ACT-')) {
       const name = obj.user_name ?? obj.name;
       if (obj.is_deleted === true || obj.is_closed === true) {
@@ -89,24 +124,40 @@ function scanText(text: string) {
   }
 }
 
+// Notice when the widget itself deletes a transaction, so dedup doesn't keep
+// treating it as present.
+function watchDelete(method: string | undefined, url: string, ok: boolean) {
+  if (!ok || method?.toUpperCase() !== 'DELETE') return;
+  const guid = /\/transactions\/(TRN-[\w-]+)/.exec(url)?.[1];
+  if (guid) forgetTransaction(guid);
+}
+
 export function installHooks() {
   window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
     if (input instanceof Request) captureHeaderBag(input.headers);
     captureHeaderBag(init?.headers);
     const response = await rawFetch(input, init);
+    const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
+    watchDelete(method, response.url || String(input instanceof Request ? input.url : input), response.ok);
     if (response.headers.get('content-type')?.includes('json')) {
       response.clone().text().then(scanText, () => {});
     }
     return response;
   };
 
-  const { setRequestHeader, send } = XMLHttpRequest.prototype;
+  const { open, setRequestHeader, send } = XMLHttpRequest.prototype;
+  const methods = new WeakMap<XMLHttpRequest, string>();
+  XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, method: string, ...rest: unknown[]) {
+    methods.set(this, method);
+    return (open as (...args: unknown[]) => void).call(this, method, ...rest);
+  } as typeof open;
   XMLHttpRequest.prototype.setRequestHeader = function (name: string, value: string) {
     captureHeader(name, value);
     return setRequestHeader.call(this, name, value);
   };
   XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
     this.addEventListener('load', () => {
+      watchDelete(methods.get(this), this.responseURL, this.status >= 200 && this.status < 300);
       if (this.responseType === '' || this.responseType === 'text') scanText(this.responseText);
       else if (this.responseType === 'json') scanEntities(this.response);
     });
