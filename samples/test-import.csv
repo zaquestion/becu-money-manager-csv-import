@@ -1,0 +1,3 @@
+Date,Payee,Amount,Category,Memo
+2026-10-21,CSV Import Test - Coffee,-4.50,Coffee Shops,csv import test
+2026-10-22,CSV Import Test - Refund,12.00,,csv import test
