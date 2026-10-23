@@ -5,6 +5,7 @@ import { dedupKey, existingCounts, ledgerRevision, recordImport } from './dedup'
 import { STYLE } from './panel-style';
 import type { Category } from './session';
 import { accounts, categories, forgetTransaction, hasSession, onSessionChange, transactionsRevision } from './session';
+import { toolbarButton, transactionsTabShown, watchToolbar } from './toolbar';
 
 const UNDO_KEY = 'becu-csv-import:last';
 const REQUEST_DELAY_MS = 250;
@@ -376,11 +377,17 @@ function setStepDone(s: { section: HTMLElement; badge: HTMLElement; n: number },
 function updateChrome(u: NonNullable<typeof ui>) {
   const job = state.job;
   const running = isRunning() && job;
-  u.toggle.hidden = state.open;
+  const progress = running ? `${job.kind === 'import' ? 'Importing' : 'Deleting'} ${job.done}/${job.total}…` : '';
+  // Prefer the button in Money Manager's toolbar. The floating one is the
+  // fallback on the Transactions tab, and keeps a running job visible elsewhere.
+  const tb = toolbarButton();
+  if (tb) {
+    tb.label.textContent = progress || 'Import CSV';
+    tb.button.setAttribute('aria-expanded', String(state.open));
+  }
+  u.toggle.hidden = state.open || (running ? !!tb : !!tb || !transactionsTabShown());
   u.toggle.classList.toggle('running', !!running);
-  u.toggle.textContent = running
-    ? `${job.kind === 'import' ? 'Importing' : 'Deleting'} ${job.done}/${job.total}…`
-    : 'CSV import';
+  u.toggle.textContent = progress || 'CSV import';
   u.toggle.ariaLabel = running ? null : 'Open CSV import';
 
   u.panel.hidden = !state.open;
@@ -869,7 +876,7 @@ function close() {
   if (state.phase === 'confirm-import' || state.phase === 'confirm-undo') state.phase = 'idle';
   state.open = false;
   update();
-  ui?.toggle.focus();
+  (toolbarButton()?.button ?? ui?.toggle)?.focus();
 }
 
 function wire(u: NonNullable<typeof ui>) {
@@ -986,6 +993,7 @@ export function mountPanel() {
   wire(ui);
   root.append(h('style', { textContent: STYLE }), ui.panel, ui.toggle);
   document.body.append(host);
+  watchToolbar(() => (state.open && !state.minimized ? close() : open()), update);
   update();
 
   // Session data trickles in as the widget loads; batch the updates.

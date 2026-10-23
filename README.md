@@ -17,7 +17,9 @@ and pick `.output/chrome-mv3`.
 ## Use
 
 1. Open Money Manager in BECU online banking and let it load.
-2. Click **CSV import** (bottom-right of the Money Manager frame).
+2. Open the Transactions tab and click **Import CSV** next to **Export CSV**.
+   (If it can't be placed there, a **CSV import** button appears at the
+   bottom-right of the Money Manager frame instead.)
 3. Pick the manual account and the CSV file.
 4. Check the column mapping and the preview, then click **Import**.
 
