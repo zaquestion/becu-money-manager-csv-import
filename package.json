@@ -2,6 +2,7 @@
   "name": "becu-import",
   "description": "Import CSV transactions into BECU Money Manager (MX) manual accounts",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "version": "0.1.0",
   "type": "module",
   "packageManager": "pnpm@12.15.0",

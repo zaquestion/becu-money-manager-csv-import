@@ -115,3 +115,7 @@ transaction, the same request the widget sends.
   hooks were installed). `GET /categories` is confirmed: it returns
   `{"categories": [{guid, name, parent_guid, …}]}`.
 - whether `memo` is accepted when a transaction is created
+
+## License
+
+[AGPL-3.0-or-later](LICENSE). Copyright 2026 Zaq Question.
