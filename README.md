@@ -7,8 +7,8 @@ widget hosted at `widgets.moneydesktop.com`.
 ## Build & load
 
 ```sh
-npm install
-npm run build        # or `npm run dev` for live reload
+pnpm install
+pnpm build           # or `pnpm dev` for live reload
 ```
 
 Open `chrome://extensions`, enable Developer mode, then click **Load unpacked**

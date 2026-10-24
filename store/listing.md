@@ -1,7 +1,7 @@
 # Chrome Web Store listing
 
 Copy-paste text for the Developer Dashboard. Upload `.output/becu-import-<version>-chrome.zip`
-(built with `npm run zip`).
+(built with `pnpm zip`).
 
 ## Name
 
