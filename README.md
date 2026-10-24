@@ -14,6 +14,26 @@ pnpm build           # or `pnpm dev` for live reload
 Open `chrome://extensions`, enable Developer mode, then click **Load unpacked**
 and pick `.output/chrome-mv3`.
 
+## Release
+
+Publish a GitHub release with a tag like `v0.2.0`. The `Release` workflow sets
+the extension version from the tag, attaches the zip to the release and submits
+it to the Chrome Web Store, where it goes live after review. The version must be
+higher than the one currently in the store.
+
+The workflow uses the Chrome Web Store API v2 with a service account. One-time
+setup:
+
+1. In Google Cloud, enable the Chrome Web Store API, create a service account
+   (no roles needed) and create a JSON key for it.
+2. In the Chrome Web Store Developer Dashboard, add the service account's email
+   under **Account**.
+3. Add these repository secrets (the extension and publisher IDs are set in
+   the workflow):
+   - `CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL` (`client_email` from the key)
+   - `CHROME_SERVICE_ACCOUNT_PRIVATE_KEY` (`private_key` from the key, pasted as
+     the multi-line PEM, not with literal `\n`)
+
 ## Use
 
 1. Open Money Manager in BECU online banking and let it load.
