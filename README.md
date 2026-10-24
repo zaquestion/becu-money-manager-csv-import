@@ -27,7 +27,8 @@ CSV columns: `date`, `payee`, `amount` (required); `category`, `memo`, `type`
 (optional). Dates can be `YYYY-MM-DD` or `M/D/YYYY`. Amounts can look like
 `-4.50`, `$1,200.00` or `(12.00)`. Category names match MX categories
 (parent or subcategory) case-insensitively. Rows with an unknown or blank
-category are imported as "Uncategorized".
+category are imported with no category, so Money Manager applies its own
+categorization rules.
 
 Credit-card exports with `Date,Amount,Currency,Type,Status,Merchant,…` columns
 work with no setup: `Merchant` is the payee, `Type` decides direction

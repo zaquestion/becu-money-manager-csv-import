@@ -122,10 +122,6 @@ function matchedCategory(row: ParsedRow, byName: Map<string, Category>): Categor
   return row.categoryName ? byName.get(row.categoryName.toLowerCase()) : undefined;
 }
 
-function resolveCategory(row: ParsedRow, byName: Map<string, Category>): Category | undefined {
-  return matchedCategory(row, byName) ?? byName.get('uncategorized');
-}
-
 function manualAccounts() {
   const all = [...accounts.values()];
   const manual = all.filter((a) => a.isManual);
@@ -559,8 +555,10 @@ function buildTable(p: Preview) {
         ),
         h('td', {
           className: matched || skipped ? '' : 'uncat',
-          textContent: skipped ? '' : (matched?.name ?? 'Uncategorized'),
-          title: !matched && row.categoryName ? `"${row.categoryName}" isn't a Money Manager category` : '',
+          textContent: skipped ? '' : (matched?.name ?? 'Auto'),
+          title: matched || skipped
+            ? ''
+            : `${row.categoryName ? `"${row.categoryName}" isn't a Money Manager category. ` : ''}Money Manager will categorize it using its rules.`,
         }),
         h('td', { className: `num ${credit ? 'credit' : 'debit'}`, textContent: `${credit ? '+' : '−'}${money.format(row.amount)}` }),
       );
@@ -608,7 +606,7 @@ function updateReview(u: NonNullable<typeof ui>, p: Preview | undefined) {
 
   u.unknownBox.hidden = !p.unknown.length;
   u.unknownBox.textContent = p.unknown.length
-    ? `Not found in Money Manager, so imported as Uncategorized: ${p.unknown.join(', ')}`
+    ? `Not Money Manager categories, so its rules will categorize these rows instead: ${p.unknown.join(', ')}`
     : '';
 
   if (fresh) {
@@ -753,7 +751,7 @@ async function runImport() {
       job.note = 'Stopped before finishing.';
       break;
     }
-    const category = resolveCategory(row, preview.byName);
+    const category = matchedCategory(row, preview.byName);
     try {
       const guid = await createTransaction({
         accountGuid: account.guid,
