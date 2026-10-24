@@ -1,7 +1,7 @@
 # Chrome Web Store listing
 
 Copy-paste text for the Developer Dashboard. Upload `.output/becu-import-<version>-chrome.zip`
-(built with `pnpm zip`).
+(built with `pnpm zip`). Store icon: `store/icon-128.png`.
 
 ## Name
 
