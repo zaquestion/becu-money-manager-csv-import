@@ -1,6 +1,6 @@
 # BECU Money Manager CSV Import
 
-Chromium extension (TypeScript + [WXT](https://wxt.dev)) that bulk-adds
+Chrome and Firefox extension (TypeScript + [WXT](https://wxt.dev)) that bulk-adds
 transactions to a manual account in BECU Money Manager, which is MX's
 widget hosted at `widgets.moneydesktop.com`.
 
@@ -14,12 +14,19 @@ pnpm build           # or `pnpm dev` for live reload
 Open `chrome://extensions`, enable Developer mode, then click **Load unpacked**
 and pick `.output/chrome-mv3`.
 
+For Firefox (140 or later), use `pnpm build:firefox` (or `pnpm dev:firefox`),
+then open `about:debugging#/runtime/this-firefox`, click **Load Temporary
+Add-on…** and pick `.output/firefox-mv3/manifest.json`.
+
 ## Release
 
 Publish a GitHub release with a tag like `v0.2.0`. The `Release` workflow sets
-the extension version from the tag, attaches the zip to the release and submits
-it to the Chrome Web Store, where it goes live after review. The version must be
-higher than the one currently in the store.
+the extension version from the tag, attaches the Chrome, Firefox and sources
+zips to the release and submits them to the Chrome Web Store and Firefox Add-ons
+(AMO), where they go live after review. The version must be higher than the one
+currently in each store.
+
+### Chrome Web Store
 
 The workflow uses the Chrome Web Store API v2 with a service account. One-time
 setup:
@@ -33,6 +40,21 @@ setup:
    - `CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL` (`client_email` from the key)
    - `CHROME_SERVICE_ACCOUNT_PRIVATE_KEY` (`private_key` from the key, pasted as
      the multi-line PEM, not with literal `\n`)
+
+### Firefox Add-ons
+
+AMO reviews the built code against the sources zip (`pnpm zip:firefox` writes
+both; `store/` and the raw captures are left out). The add-on ID
+`becu-money-manager-csv-import@zaquestion.github.io` is set in `wxt.config.ts`.
+One-time setup:
+
+1. Submit the first version by hand at
+   <https://addons.mozilla.org/developers/addon/submit/> (the API can only add
+   versions to an existing add-on): upload the Firefox zip, then the sources
+   zip, and fill in the listing from `store/listing.md`.
+2. Create API credentials at
+   <https://addons.mozilla.org/developers/addon/api/key/> and add them as
+   repository secrets `FIREFOX_JWT_ISSUER` and `FIREFOX_JWT_SECRET`.
 
 ## Use
 

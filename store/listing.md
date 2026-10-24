@@ -1,6 +1,7 @@
-# Chrome Web Store listing
+# Store listings
 
-Copy-paste text for the Developer Dashboard. Upload `.output/becu-import-<version>-chrome.zip`
+Copy-paste text for the Chrome Web Store Developer Dashboard and, where noted under
+[Firefox Add-ons (AMO)](#firefox-add-ons-amo), the AMO Developer Hub. Chrome: Upload `.output/becu-import-<version>-chrome.zip`
 (built with `pnpm zip`). Store icon: `store/icon-128.png`.
 
 ## Name
@@ -59,6 +60,48 @@ Certify all three:
 - I do not sell or transfer user data to third parties, outside of the approved use cases
 - I do not use or transfer user data for purposes that are unrelated to my item's single purpose
 - I do not use or transfer user data to determine creditworthiness or for lending purposes
+
+## Firefox Add-ons (AMO)
+
+Upload `.output/becu-import-<version>-firefox.zip`, then `.output/becu-import-<version>-sources.zip`
+when asked for source code (both from `pnpm zip:firefox`). Add-on ID:
+`becu-money-manager-csv-import@zaquestion.github.io`. Requires Firefox 140+. Reuse the name, the
+detailed description, the icon and the screenshots from above.
+
+**Summary (max 250 chars):** Bulk-import CSV transactions into BECU Money Manager manual accounts.
+Unofficial; not affiliated with BECU or MX.
+
+**Categories:** Other
+
+**Tags:** csv, import, budget, finance, money manager, bank
+
+**Support site:** https://github.com/zaquestion/becu-money-manager-csv-import/issues
+
+**Homepage:** https://github.com/zaquestion/becu-money-manager-csv-import
+
+**License:** pick one in the form (the repo has no LICENSE file yet).
+
+**Privacy policy:** paste the quoted text under [Privacy policy](#privacy-policy) below.
+
+**Data collection (from the manifest):** Financial and payment information, required. Transactions
+from the CSV the user picks are written to their own Money Manager manual account when they click
+Import. Nothing is sent to the developer.
+
+**Notes to reviewer:**
+
+> Built with WXT (Vite). To reproduce the uploaded zip from the sources zip: Node 22 and pnpm
+> 12.15.0 (pinned in package.json `packageManager`; `corepack enable` selects it), then
+> `pnpm install --frozen-lockfile && pnpm zip:firefox`. The build is in `.output/firefox-mv3/`
+> and the zip in `.output/`. No remote code; everything is bundled.
+>
+> Testing needs a BECU online banking account (Money Manager runs at widgets.moneydesktop.com
+> inside it), so it can't be tried without one; `samples/test-import.csv` is a sample file. The
+> only script is a MAIN-world content script on widgets.moneydesktop.com. It wraps fetch/XHR to
+> reuse the widget's session headers and read the accounts, categories and transactions it loads,
+> and adds an Import CSV button. The CSV is parsed locally (papaparse); on Import it sends the
+> widget's own `POST /transactions` request per row, and "Delete last import" sends its
+> `DELETE /transactions/{guid}`. A ledger of created transactions is kept in the page's
+> localStorage to skip duplicates.
 
 ## Privacy policy
 
