@@ -177,6 +177,12 @@ export const STYLE = `
   tr.skip td.payee { text-decoration: line-through; text-decoration-color: var(--border); }
   .tag { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--subtle); color: var(--muted); font-size: 11px; text-decoration: none; }
   .tag.pending { background: var(--warn-bg); color: var(--warn); }
+  .tag.possible { background: var(--warn-bg); color: var(--warn); }
+  tr.possible td.payee { text-decoration: none; }
+  .review { display: block; margin-top: 4px; }
+  .review label { display: inline-flex; align-items: center; gap: 4px; color: var(--fg); font-weight: 600; cursor: pointer; }
+  .review input { margin: 0; }
+  td.learned { color: var(--fg); }
 
   .option { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: var(--muted); cursor: pointer; }
   .option[hidden] { display: none; }

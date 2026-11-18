@@ -1,7 +1,9 @@
 import { ApiError, CREDIT, createTransaction, deleteTransaction, refreshEntities } from './api';
 import { FIELDS, REQUIRED, guessMapping, normalize, readCsv } from './csv';
 import type { CsvFile, Field, Mapping, ParsedRow, RowError, SignMode } from './csv';
-import { dedupKey, existingCounts, ledgerRevision, recordImport } from './dedup';
+import type { Match } from './dedup';
+import { dedupKey, exactKey, importTag, ledgerRevision, loadedSince, matchRows, recordImport, withTag } from './dedup';
+import { CategoryLearner } from './learn';
 import { STYLE } from './panel-style';
 import type { Category } from './session';
 import { accounts, categories, forgetTransaction, hasSession, onSessionChange, transactionsRevision } from './session';
@@ -55,6 +57,7 @@ interface State {
   fileVersion: number;
   includePending: boolean;
   includeDuplicates: boolean;
+  approved: Set<number>; // CSV lines of possible duplicates ticked for import
   fileError?: string;
   mapping: Mapping;
   signMode: SignMode;
@@ -72,6 +75,7 @@ const state: State = {
   fileVersion: 0,
   includePending: false,
   includeDuplicates: false,
+  approved: new Set(),
   mapping: {},
   signMode: 'negative-is-debit',
   mappingExpanded: false,
@@ -118,8 +122,15 @@ function categoryByName(): Map<string, Category> {
   return byName;
 }
 
-function matchedCategory(row: ParsedRow, byName: Map<string, Category>): Category | undefined {
+function csvCategory(row: ParsedRow, byName: Map<string, Category>): Category | undefined {
   return row.categoryName ? byName.get(row.categoryName.toLowerCase()) : undefined;
+}
+
+// A category from the CSV wins; otherwise use what earlier transactions from
+// the same merchant were categorized as.
+interface CategoryChoice {
+  category: Category;
+  learnedFrom?: string;
 }
 
 function manualAccounts() {
@@ -140,27 +151,37 @@ function mappingProblem(): string | undefined {
 // ---------------------------------------------------------------------------
 // Preview (memoized: normalize + category matching only rerun when inputs change)
 
-// What happens to each valid row. Only 'new' rows are imported.
-type Disposition = 'new' | 'duplicate' | 'pending' | 'void';
+// What happens to each valid row. 'new' rows are imported, and 'possible'
+// duplicates only when ticked.
+type Disposition = 'new' | 'duplicate' | 'possible' | 'pending' | 'void';
 
 const DISPOSITION_LABELS: Record<Exclude<Disposition, 'new'>, string> = {
   duplicate: 'Already imported',
+  possible: 'Possible duplicate',
   pending: 'Pending',
   void: 'Voided',
 };
 
 interface Preview {
   key: string;
+  tableKey: string; // like key, minus the ticks, so ticking doesn't rebuild the table
   rows: ParsedRow[];
   dispositions: Map<ParsedRow, Disposition>;
+  matches: Map<ParsedRow, Match>;
   toImport: ParsedRow[];
   duplicates: number;
+  possible: number;
+  approved: number;
   pending: number;
   voided: number;
   errors: RowError[];
-  byName: Map<string, Category>;
+  choices: Map<ParsedRow, CategoryChoice>;
   unknown: string[];
+  learned: number;
   uncategorized: number;
+  // Rows older than anything Money Manager has loaded, so only checked
+  // against this browser's ledger.
+  unchecked: { count: number; since?: number };
   expenses: { count: number; total: number };
   income: { count: number; total: number };
 }
@@ -169,54 +190,77 @@ let cachedPreview: Preview | undefined;
 
 function getPreview(): Preview | undefined {
   if (!state.file || mappingProblem()) return undefined;
-  const key = JSON.stringify([
+  const tableKey = JSON.stringify([
     state.fileVersion, state.mapping, state.signMode, categories.size, state.accountGuid,
     state.includePending, state.includeDuplicates, ledgerRevision, transactionsRevision,
   ]);
+  const key = `${tableKey}|${[...state.approved].sort((a, b) => a - b).join(',')}`;
   if (cachedPreview?.key === key) return cachedPreview;
 
   const { rows, errors } = normalize(state.file, state.mapping, state.signMode);
-  const existing = state.accountGuid ? existingCounts(state.accountGuid) : new Map<string, number>();
+  const candidates = rows.filter((r) => r.status === 'settled' || (r.status === 'pending' && state.includePending));
+  const keyed = candidates.map((row) => ({
+    row,
+    loose: dedupKey(row.date, row.amount, row.type),
+    exact: exactKey(row.date, row.amount, row.type, row.payee),
+  }));
+  const matched =
+    state.accountGuid && !state.includeDuplicates ? matchRows(state.accountGuid, keyed) : new Map<(typeof keyed)[number], Match>();
+  const matches = new Map<ParsedRow, Match>();
+  for (const k of keyed) matches.set(k.row, matched.get(k) ?? { kind: 'new' });
+
   const dispositions = new Map<ParsedRow, Disposition>();
   const toImport: ParsedRow[] = [];
-  const counts = { duplicate: 0, pending: 0, void: 0 };
+  const counts = { duplicate: 0, possible: 0, pending: 0, void: 0 };
+  let approved = 0;
   for (const row of rows) {
     let disposition: Disposition;
     if (row.status === 'void') disposition = 'void';
     else if (row.status === 'pending' && !state.includePending) disposition = 'pending';
-    else {
-      // Identical rows are fine (two $5 rides on one day); only as many as
-      // already exist count as duplicates.
-      const k = dedupKey(row.date, row.amount, row.type);
-      const left = existing.get(k) ?? 0;
-      if (left > 0 && !state.includeDuplicates) {
-        existing.set(k, left - 1);
-        disposition = 'duplicate';
-      } else disposition = 'new';
-    }
+    else disposition = matches.get(row)!.kind === 'possible' ? 'possible' : matches.get(row)!.kind === 'duplicate' ? 'duplicate' : 'new';
     dispositions.set(row, disposition);
-    if (disposition === 'new') toImport.push(row);
-    else counts[disposition]++;
+    if (disposition !== 'new') counts[disposition]++;
+    if (disposition === 'new' || (disposition === 'possible' && state.approved.has(row.line))) toImport.push(row);
+    if (disposition === 'possible' && state.approved.has(row.line)) approved++;
   }
 
   const byName = categoryByName();
+  const learner = new CategoryLearner();
+  const choices = new Map<ParsedRow, CategoryChoice>();
   const unknown = new Set<string>();
   const expenses = { count: 0, total: 0 };
   const income = { count: 0, total: 0 };
   let uncategorized = 0;
+  let learned = 0;
+  for (const row of rows) {
+    const d = dispositions.get(row);
+    if (d !== 'new' && d !== 'possible') continue;
+    const fromCsv = csvCategory(row, byName);
+    const suggestion = fromCsv ? undefined : learner.suggest(row.payee);
+    if (fromCsv) choices.set(row, { category: fromCsv });
+    else if (suggestion) choices.set(row, { category: suggestion.category, learnedFrom: suggestion.from });
+  }
   for (const row of toImport) {
-    if (!matchedCategory(row, byName)) {
+    const choice = choices.get(row);
+    if (!choice) {
       uncategorized++;
       if (row.categoryName) unknown.add(row.categoryName);
-    }
+    } else if (choice.learnedFrom) learned++;
     const bucket = row.type === CREDIT ? income : expenses;
     bucket.count++;
     bucket.total += row.amount;
   }
+
+  const since = loadedSince();
+  const unchecked = {
+    count: candidates.filter((r) => since === undefined || Math.floor(r.date / 86400) < Math.floor(since / 86400)).length,
+    since,
+  };
+
   cachedPreview = {
-    key, rows, dispositions, toImport,
-    duplicates: counts.duplicate, pending: counts.pending, voided: counts.void,
-    errors, byName, unknown: [...unknown], uncategorized, expenses, income,
+    key, tableKey, rows, dispositions, matches, toImport,
+    duplicates: counts.duplicate, possible: counts.possible, approved, pending: counts.pending, voided: counts.void,
+    errors, choices, unknown: [...unknown], learned, uncategorized, unchecked, expenses, income,
   };
   return cachedPreview;
 }
@@ -306,13 +350,18 @@ function buildUi() {
   const errorsList = h('ul', {});
   const errorsBox = h('details', { className: 'callout danger' }, errorsSummary, errorsList);
   const unknownBox = h('p', { className: 'callout warn' });
+  const possibleText = h('span', {});
+  const tickAllBtn = h('button', { type: 'button', className: 'link' });
+  const possibleBox = h('p', { className: 'callout warn' }, possibleText, ' ', tickAllBtn);
+  const coverageBox = h('p', { className: 'callout' });
+  const learnedBox = h('p', { className: 'hint' });
   const pendingCheck = h('input', { type: 'checkbox', id: 'include-pending' });
   const pendingOption = h('label', { className: 'option', htmlFor: 'include-pending' }, pendingCheck, h('span', {}));
   const dupCheck = h('input', { type: 'checkbox', id: 'include-dups' });
   const dupOption = h('label', { className: 'option', htmlFor: 'include-dups' }, dupCheck, h('span', {}));
   const tableWrap = h('div', { className: 'table-wrap', tabIndex: 0, ariaLabel: 'Rows to import' });
   const tableNote = h('p', { className: 'hint' });
-  const step4 = step(4, 'Review', stats, errorsBox, unknownBox, pendingOption, dupOption, tableWrap, tableNote);
+  const step4 = step(4, 'Review', stats, errorsBox, possibleBox, coverageBox, unknownBox, learnedBox, pendingOption, dupOption, tableWrap, tableNote);
 
   const content = h('div', { className: 'content' }, status, step1.section, step2.section, step3.section, step4.section);
 
@@ -345,6 +394,7 @@ function buildUi() {
     step2, fileInput, fileLabel, dropHint, chooseBtn, dropZone, fileError,
     step3, chips, editMapBtn, mapSummary, mapGrid, fieldSelects, fieldSamples, signSelect, mapWarn,
     step4, stats, errorsSummary, errorsList, errorsBox, unknownBox, tableWrap, tableNote,
+    possibleBox, possibleText, tickAllBtn, coverageBox, learnedBox,
     pendingCheck, pendingOption, dupCheck, dupOption,
     content, progress, progressLabel, progressBar, result, resultText, reloadBtn, logBox, logPre,
     undoBtn, message, cancelBtn, stopBtn, confirmBtn, importBtn,
@@ -537,28 +587,48 @@ function buildTable(p: Preview) {
     'tbody',
     {},
     ...p.rows.slice(0, PREVIEW_LIMIT).map((row) => {
-      const matched = matchedCategory(row, p.byName);
+      const choice = p.choices.get(row);
       const credit = row.type === CREDIT;
       const disposition = p.dispositions.get(row)!;
-      const skipped = disposition !== 'new';
+      const possible = disposition === 'possible';
+      const skipped = disposition !== 'new' && !possible;
+      const match = p.matches.get(row);
+      let review: HTMLElement | false = false;
+      if (possible && match?.kind === 'possible') {
+        const box = h('input', { type: 'checkbox', checked: state.approved.has(row.line), disabled: isRunning() });
+        box.dataset.line = String(row.line);
+        const existing = match.existing;
+        const what = existing.payee ? `“${existing.payee}”` : 'a transaction';
+        review = h(
+          'span',
+          { className: 'review' },
+          h('label', {}, box, ' Import anyway'),
+          h('span', { className: 'memo', textContent: `${what} on ${formatDate(row.date)} has the same amount.` }),
+        );
+      }
       return h(
         'tr',
-        { className: skipped ? 'skip' : '' },
+        { className: `${skipped || (possible && !state.approved.has(row.line)) ? 'skip' : ''}${possible ? ' possible' : ''}` },
         h('td', { className: 'line', textContent: String(row.line) }),
         h('td', { className: 'date', textContent: formatDate(row.date) }),
         h(
           'td',
           { className: 'payee' },
           row.payee,
-          skipped && h('span', { className: `tag ${disposition}`, textContent: DISPOSITION_LABELS[disposition] }),
+          disposition !== 'new' && h('span', { className: `tag ${disposition}`, textContent: DISPOSITION_LABELS[disposition] }),
           row.memo && h('span', { className: 'memo', textContent: row.memo }),
+          review,
         ),
         h('td', {
-          className: matched || skipped ? '' : 'uncat',
-          textContent: skipped ? '' : (matched?.name ?? 'Auto'),
-          title: matched || skipped
+          className: skipped ? '' : choice ? (choice.learnedFrom ? 'learned' : '') : 'uncat',
+          textContent: skipped ? '' : (choice ? `${choice.category.name}${choice.learnedFrom ? ' ✦' : ''}` : 'None'),
+          title: skipped
             ? ''
-            : `${row.categoryName ? `"${row.categoryName}" isn't a Money Manager category. ` : ''}Money Manager will categorize it using its rules.`,
+            : choice?.learnedFrom
+              ? `Same as earlier “${choice.learnedFrom}”.`
+              : choice
+                ? ''
+                : `${row.categoryName ? `"${row.categoryName}" isn't a Money Manager category, and n` : 'N'}o earlier transaction from this payee has a category.`,
         }),
         h('td', { className: `num ${credit ? 'credit' : 'debit'}`, textContent: `${credit ? '+' : '−'}${money.format(row.amount)}` }),
       );
@@ -581,6 +651,7 @@ function updateReview(u: NonNullable<typeof ui>, p: Preview | undefined) {
     stat('Expenses', `−${money.format(p.expenses.total)}`, plural(p.expenses.count, 'row'), 'debit'),
     stat('Income', `+${money.format(p.income.total)}`, plural(p.income.count, 'row'), 'credit'),
     stat('Already in', String(p.duplicates), 'skipped as duplicates'),
+    ...(p.possible ? [stat('Review', String(p.possible), `possible duplicate${p.possible === 1 ? '' : 's'}, ${p.approved} ticked`, 'warn')] : []),
     stat('Skipped', String(p.pending + p.voided + p.errors.length), skippedParts.join(', ') || 'none', p.errors.length ? 'warn' : undefined),
   );
 
@@ -590,13 +661,13 @@ function updateReview(u: NonNullable<typeof ui>, p: Preview | undefined) {
   u.pendingCheck.disabled = isRunning();
   u.pendingOption.lastElementChild!.textContent =
     `Import ${plural(pendingRows, 'pending transaction')} now. Off by default: pending amounts can change (tips) or be voided, and settled rows import cleanly from a later export.`;
-  u.dupOption.hidden = !p.duplicates && !state.includeDuplicates;
+  u.dupOption.hidden = !p.duplicates && !p.possible && !state.includeDuplicates;
   u.dupCheck.checked = state.includeDuplicates;
   u.dupCheck.disabled = isRunning();
   u.dupOption.lastElementChild!.textContent =
-    'Import rows that match transactions already in this account (same date, amount and direction) anyway.';
+    'Ignore duplicate checks and import every row, even ones already imported.';
 
-  const fresh = u.tableKey !== p.key;
+  const fresh = u.tableKey !== p.tableKey;
   u.errorsBox.hidden = !p.errors.length;
   if (fresh) {
     u.errorsSummary.textContent = `${plural(p.errors.length, 'row')} will be skipped`;
@@ -604,15 +675,43 @@ function updateReview(u: NonNullable<typeof ui>, p: Preview | undefined) {
     u.errorsBox.open = p.errors.length > 0 && p.errors.length <= 5;
   }
 
+  u.possibleBox.hidden = !p.possible;
+  u.possibleText.textContent =
+    `${plural(p.possible, 'row')} ${p.possible === 1 ? 'has' : 'have'} the same date, amount and direction as a transaction already in this account ` +
+    `that this tool didn't import from that exact row (entered by hand, or exported under a different name). ` +
+    `${p.possible === 1 ? 'It is' : 'They are'} skipped unless you tick “Import anyway” in the table.`;
+  u.tickAllBtn.textContent = p.approved === p.possible ? 'Untick all' : 'Tick all';
+  u.tickAllBtn.disabled = isRunning();
+
+  const since = p.unchecked.since;
+  u.coverageBox.hidden = !p.unchecked.count || state.includeDuplicates;
+  u.coverageBox.className = 'callout warn';
+  u.coverageBox.textContent =
+    since === undefined
+      ? 'Money Manager hasn\'t loaded any transactions yet, so duplicates are only checked against what this browser imported, and no categories can be learned. Open the Transactions tab for this account first.'
+      : `${plural(p.unchecked.count, 'row')} ${p.unchecked.count === 1 ? 'is' : 'are'} older than ${formatDate(since)}, the earliest transaction Money Manager has loaded, so ${p.unchecked.count === 1 ? 'it is' : 'they are'} only checked against what this browser imported. Widen the date range on the Transactions tab to check ${p.unchecked.count === 1 ? 'it' : 'them'} too.`;
+
   u.unknownBox.hidden = !p.unknown.length;
   u.unknownBox.textContent = p.unknown.length
-    ? `Not Money Manager categories, so its rules will categorize these rows instead: ${p.unknown.join(', ')}`
+    ? `Not Money Manager categories, and no earlier transactions to learn from, so these rows are imported without a category: ${p.unknown.join(', ')}`
     : '';
+  u.learnedBox.hidden = !p.learned && !p.uncategorized;
+  u.learnedBox.textContent = [
+    p.learned && `✦ ${p.learned} ${p.learned === 1 ? 'category' : 'categories'} copied from earlier transactions with the same payee.`,
+    p.uncategorized && `${p.uncategorized} without a category.`,
+  ].filter(Boolean).join(' ');
 
-  if (fresh) {
+  if (u.tableKey !== p.tableKey) {
     u.tableWrap.replaceChildren(buildTable(p));
     u.tableWrap.scrollTop = 0;
-    u.tableKey = p.key;
+    u.tableKey = p.tableKey;
+  } else {
+    // Ticks changed (maybe via "Tick all"); patch the rows in place.
+    for (const box of u.tableWrap.querySelectorAll<HTMLInputElement>('input[data-line]')) {
+      box.checked = state.approved.has(Number(box.dataset.line));
+      box.disabled = isRunning();
+      box.closest('tr')?.classList.toggle('skip', !box.checked);
+    }
   }
   u.tableWrap.hidden = !p.rows.length;
   u.tableNote.hidden = p.rows.length <= PREVIEW_LIMIT;
@@ -672,7 +771,9 @@ function updateFooter(u: NonNullable<typeof ui>, p: Preview | undefined) {
   if (phase === 'confirm-import') {
     u.message.textContent = state.includeDuplicates
       ? `Add ${plural(count, 'transaction')} to “${account?.name ?? ''}”, including ones that look already imported?`
-      : `Add ${plural(count, 'transaction')} to “${account?.name ?? ''}”?`;
+      : p?.approved
+        ? `Add ${plural(count, 'transaction')} to “${account?.name ?? ''}”, including ${p.approved} possible duplicate${p.approved === 1 ? '' : 's'} you ticked?`
+        : `Add ${plural(count, 'transaction')} to “${account?.name ?? ''}”?`;
     u.confirmBtn.className = 'btn primary';
     u.confirmBtn.textContent = 'Confirm import';
   } else if (phase === 'confirm-undo') {
@@ -742,6 +843,7 @@ async function runImport() {
   const rows = preview.toImport;
   const job = startJob('import', rows.length, account.name);
   state.includeDuplicates = false;
+  state.approved.clear();
   setPhase('importing', ui?.stopBtn);
   const created: string[] = [];
   let failures = 0;
@@ -751,7 +853,8 @@ async function runImport() {
       job.note = 'Stopped before finishing.';
       break;
     }
-    const category = matchedCategory(row, preview.byName);
+    const category = preview.choices.get(row)?.category;
+    const tag = importTag(row.date, row.amount, row.type, row.payee);
     try {
       const guid = await createTransaction({
         accountGuid: account.guid,
@@ -759,12 +862,12 @@ async function runImport() {
         type: row.type,
         date: row.date,
         payee: row.payee,
-        memo: row.memo,
+        memo: withTag(row.memo, tag),
         category: category && { guid: category.guid, name: category.name },
       });
       created.push(guid);
       saveUndo(created);
-      recordImport(account.guid, dedupKey(row.date, row.amount, row.type), guid);
+      recordImport(account.guid, dedupKey(row.date, row.amount, row.type), guid, exactKey(row.date, row.amount, row.type, row.payee));
       failures = 0;
       job.ok++;
       appendLog(`✓ line ${row.line}: ${row.payee}`);
@@ -846,6 +949,7 @@ async function loadFile(file: File) {
   state.mappingExpanded = false;
   state.includePending = false;
   state.includeDuplicates = false;
+  state.approved = new Set();
   if (state.job?.finished) state.job = undefined;
   state.phase = 'idle';
   update();
@@ -963,6 +1067,25 @@ function wire(u: NonNullable<typeof ui>) {
   });
   u.dupCheck.addEventListener('change', () => {
     state.includeDuplicates = u.dupCheck.checked;
+    if (state.phase === 'confirm-import') state.phase = 'idle';
+    update();
+  });
+
+  u.tableWrap.addEventListener('change', (e) => {
+    const box = e.target as HTMLInputElement;
+    const line = Number(box.dataset?.line);
+    if (!line) return;
+    if (box.checked) state.approved.add(line);
+    else state.approved.delete(line);
+    if (state.phase === 'confirm-import') state.phase = 'idle';
+    update();
+  });
+  u.tickAllBtn.addEventListener('click', () => {
+    const p = getPreview();
+    if (!p) return;
+    const lines = p.rows.filter((r) => p.dispositions.get(r) === 'possible').map((r) => r.line);
+    const all = lines.every((l) => state.approved.has(l));
+    for (const l of lines) all ? state.approved.delete(l) : state.approved.add(l);
     if (state.phase === 'confirm-import') state.phase = 'idle';
     update();
   });

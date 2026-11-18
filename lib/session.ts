@@ -8,13 +8,17 @@ export interface Account {
   isManual?: boolean;
 }
 
-// Just what dedup needs from transactions the widget loads.
+// What dedup and category learning need from transactions the widget loads.
 export interface KnownTransaction {
   guid: string;
   accountGuid: string;
   date: number; // unix seconds
   amount: number;
   type: number;
+  payee?: string; // the name shown in Money Manager (may be renamed)
+  originalDescription?: string;
+  memo?: string;
+  categoryGuid?: string;
 }
 
 export interface Category {
@@ -95,7 +99,18 @@ export function scanEntities(value: unknown, depth = 0) {
         Number.isFinite(date) &&
         (obj.transaction_type === 1 || obj.transaction_type === 2)
       ) {
-        transactions.set(guid, { guid, accountGuid: obj.account_guid, date, amount: Math.abs(amount), type: obj.transaction_type });
+        const str = (v: unknown) => (typeof v === 'string' && v.trim() ? v : undefined);
+        transactions.set(guid, {
+          guid,
+          accountGuid: obj.account_guid,
+          date,
+          amount: Math.abs(amount),
+          type: obj.transaction_type,
+          payee: str(obj.description) ?? str(obj.payee),
+          originalDescription: str(obj.original_description),
+          memo: str(obj.memo),
+          categoryGuid: typeof obj.category_guid === 'string' && obj.category_guid.startsWith('CAT-') ? obj.category_guid : undefined,
+        });
         transactionsRevision++;
       }
       notify();

@@ -68,9 +68,22 @@ One-time setup:
 CSV columns: `date`, `payee`, `amount` (required); `category`, `memo`, `type`
 (optional). Dates can be `YYYY-MM-DD` or `M/D/YYYY`. Amounts can look like
 `-4.50`, `$1,200.00` or `(12.00)`. Category names match MX categories
-(parent or subcategory) case-insensitively. Rows with an unknown or blank
-category are imported with no category, so Money Manager applies its own
-categorization rules.
+(parent or subcategory) case-insensitively.
+
+### Categories
+
+Money Manager's categorization rules don't run on transactions added to a
+manual account, so the extension learns them itself. For each row without a
+usable `category` column, it looks at the transactions Money Manager has
+loaded (in every account) for the same payee and copies the category you, or
+Money Manager, gave them most often. Payees are compared loosely: processor
+prefixes (`SQ *`, `TST*`, …), store numbers and reference codes are ignored,
+and "Blue Bottle Coffee 4471" or "UBER *TRIP" can fall back to an earlier
+"Blue Bottle" or "Uber" when that payee's category is clear-cut. Transactions
+this tool imported are also matched by their original CSV payee (from the
+import tag below), so renaming one in Money Manager doesn't break learning.
+Learned categories are marked ✦ in the preview; rows with nothing to learn
+from are imported without a category.
 
 Credit-card exports with `Date,Amount,Currency,Type,Status,Merchant,…` columns
 work with no setup: `Merchant` is the payee, `Type` decides direction
@@ -82,18 +95,39 @@ are skipped unless you tick the box, since their amount can still change.
 ### Duplicates
 
 Import overlapping exports as often as you like; only new transactions are
-added. A row counts as already imported when the account already has a
-transaction with the same date, amount and direction (identical rows in one
-file are counted, so two $5 rides on the same day both import). "Already in"
-comes from:
+added. Every imported transaction gets an import tag appended to its memo,
+recording the CSV row it came from:
 
-- a ledger of every transaction this extension created, kept in the browser's
-  storage for `widgets.moneydesktop.com` (per browser profile), and
-- transactions Money Manager itself has loaded on the page.
+```
+[import 2026-11-01 -4.50 SQ *BLUE BOTTLE #12]
+```
 
-Deleting a transaction ("Delete last import", or in Money Manager while the
-extension is loaded) removes it from the ledger so it can be imported again.
-If you delete one some other way, tick "Import rows that match … anyway".
+Leave the tag in place: it's how the transaction is recognized after you
+rename it, recategorize it or change its amount (e.g. adding a tip). Each row
+is checked in this order:
+
+1. **Already imported:** a transaction in the account has the same tag (same
+   date, amount, direction and original payee). Skipped.
+2. **Already imported:** this browser's ledger of what the extension created
+   has a transaction with the same date, amount and direction, from before
+   tags existed or whose memo didn't stick. Skipped.
+3. **Possible duplicate:** some other transaction in the account has the same
+   date, amount and direction (entered by hand, or imported from an export
+   that named the merchant differently). Flagged in the preview and skipped
+   unless you tick **Import anyway** for that row.
+
+Each existing transaction matches at most one row, so identical rows in one
+file are counted: two $5 rides on the same day against one $5 ride already in
+the account gives one match and one new row.
+
+Matching uses the transactions Money Manager has loaded on the page plus the
+ledger, which is kept in the browser's storage for `widgets.moneydesktop.com`
+(per browser profile). The preview warns about rows older than anything
+Money Manager has loaded; widen the date range on the Transactions tab to
+check those too. Deleting a transaction ("Delete last import", or in Money
+Manager while the extension is loaded) removes it from the ledger so it can
+be imported again. If you delete one some other way, tick "Ignore duplicate
+checks".
 
 ## How it works
 
@@ -114,7 +148,10 @@ transaction, the same request the widget sends.
 - `GET /accounts` (fallback when the widget's own load happened before the
   hooks were installed). `GET /categories` is confirmed: it returns
   `{"categories": [{guid, name, parent_guid, …}]}`.
-- whether `memo` is accepted when a transaction is created
+- whether `memo` is accepted when a transaction is created (the ledger also
+  keeps each import's tag, so dedup in the same browser works either way)
+- that loaded transactions carry `description`, `memo`, `category_guid` and
+  `original_description`, which category learning and tag matching read
 
 ## License
 

@@ -26,8 +26,8 @@ Features
 • Works with simple Date / Payee / Amount files, plus optional Category, Memo and Type columns
 • Reads credit-card exports (Date, Amount, Type, Status, Merchant, …) with no setup; voided and declined rows are skipped, pending rows are optional
 • Accepts dates like 2026-10-22 or 10/22/2026, and amounts like -4.50, $1,200.00 or (12.00)
-• Matches category names to your Money Manager categories
-• Skips transactions that are already in the account, so overlapping exports can be imported safely
+• Matches category names to your Money Manager categories, and fills in categories from your earlier transactions with the same payee
+• Skips transactions that are already in the account, even after you rename or recategorize them, and flags possible duplicates for review, so overlapping exports can be imported safely
 • "Delete last import" undoes the most recent import
 
 Works elsewhere too
@@ -107,4 +107,4 @@ Import. Nothing is sent to the developer.
 
 The dashboard needs a URL. You could link to this section on GitHub, or add a PRIVACY.md with:
 
-> CSV Import for BECU Money Manager does not collect, store on any server, sell, or share any personal data. It runs only on widgets.moneydesktop.com. CSV files you pick are read locally in your browser. Transactions you choose to import are sent only to Money Manager, using your existing signed-in session. To avoid importing duplicates, the extension keeps a list of the transactions it created (date, amount, account and transaction IDs) in your browser's local storage for widgets.moneydesktop.com; it never leaves your device. The developer receives no data. Questions: open an issue at https://github.com/zaquestion/becu-money-manager-csv-import/issues
+> CSV Import for BECU Money Manager does not collect, store on any server, sell, or share any personal data. It runs only on widgets.moneydesktop.com. CSV files you pick are read locally in your browser. Transactions you choose to import are sent only to Money Manager, using your existing signed-in session. To avoid importing duplicates, the extension keeps a list of the transactions it created (date, amount, original payee, account and transaction IDs) in your browser's local storage for widgets.moneydesktop.com; it never leaves your device. The developer receives no data. Questions: open an issue at https://github.com/zaquestion/becu-money-manager-csv-import/issues
